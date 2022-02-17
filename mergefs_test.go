@@ -6,15 +6,14 @@ package mergefs
 import (
 	"io"
 	"math/rand"
-	"os"
 	"testing"
 )
 
 func TestFile(t *testing.T) {
 	name := "mergefs"
 	{
-		os.Remove(name)
-		defer os.Remove(name)
+		Remove(name)
+		defer Remove(name)
 	}
 	content := make([]byte, 1024*64)
 	{
@@ -26,11 +25,10 @@ func TestFile(t *testing.T) {
 		}
 	}
 	{
-		f, err := OpenSegFile(name)
+		f, err := OpenFile(name)
 		if err != nil {
 			t.Error(err)
 		}
-
 		{
 			offset := int64(0)
 			length := len(content) / 2
@@ -63,7 +61,7 @@ func TestFile(t *testing.T) {
 	}
 
 	{
-		f, err := OpenSegFile(name)
+		f, err := OpenFile(name)
 		if err != nil {
 			t.Error(err)
 		}
