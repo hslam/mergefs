@@ -5,20 +5,44 @@
 package mergefs
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"math/rand"
 	"os"
+	"sort"
+	"unsafe"
 )
 
 const (
 	numFiles = 2
 )
 
-type seg struct {
+const segHeaderSize = int(unsafe.Sizeof(segHeader{}))
+
+type segHeader struct {
 	off  uint64
 	size uint64
+}
+
+func (h *segHeader) marshal() []byte {
+	var b []byte
+	r := (*struct {
+		data uintptr
+		len  int
+		cap  int
+	})(unsafe.Pointer(&b))
+	r.data = uintptr(unsafe.Pointer(h))
+	r.len = segHeaderSize
+	r.cap = segHeaderSize
+	return b
+}
+
+func (h *segHeader) unmarshal(b []byte) {
+	*h = *(*segHeader)(unsafe.Pointer(&b[0]))
+}
+
+type seg struct {
+	segHeader
 	pos  uint64
 	data []byte
 }
@@ -26,7 +50,8 @@ type seg struct {
 func mergeSegs(a []seg, b []seg) []seg {
 	if len(a) == 0 {
 		return b
-	} else if len(b) == 0 {
+	}
+	if len(b) == 0 {
 		return a
 	}
 	m, n := a, b
@@ -159,7 +184,7 @@ type SegFile struct {
 	name string
 	file *os.File
 	size int64
-	off  uint64
+	off  int64
 	segs []seg
 }
 
@@ -173,7 +198,7 @@ func OpenSegFile(name string) (*SegFile, error) {
 		return nil, err
 	}
 	f := &SegFile{name: name, file: file}
-	var a [16]byte
+	var a [segHeaderSize]byte
 	var off int64
 	for {
 		buf := a[:]
@@ -183,15 +208,17 @@ func OpenSegFile(name string) (*SegFile, error) {
 				return nil, err
 			}
 			break
-		} else if n != 16 {
+		}
+		if n != segHeaderSize {
 			break
 		}
 		var s seg
-		s.off = binary.LittleEndian.Uint64(buf)
-		s.size = binary.LittleEndian.Uint64(buf[8:])
-		s.pos = uint64(off) + 16
+		h := &segHeader{}
+		h.unmarshal(buf)
+		s.segHeader = *h
+		s.pos = uint64(off) + uint64(segHeaderSize)
 		f.segs = append(f.segs, s)
-		f.off += 16 + s.size
+		f.off += int64(segHeaderSize) + int64(s.size)
 		off = int64(f.off)
 		f.size = int64(s.off + s.size)
 	}
@@ -205,15 +232,11 @@ func OpenSegFile(name string) (*SegFile, error) {
 //
 // If file was opened with the O_APPEND flag, WriteAt returns an error.
 func (f *SegFile) WriteAt(b []byte, off int64) (n int, err error) {
-	s := seg{off: uint64(off), size: uint64(len(b)), pos: f.off + 16}
-	var a [16]byte
-	buf := a[:]
-	binary.LittleEndian.PutUint64(buf, s.off)
-	binary.LittleEndian.PutUint64(buf[8:], s.size)
-	f.file.WriteAt(buf, int64(f.off))
-	n, err = f.file.WriteAt(b, int64(f.off+16))
+	s := seg{segHeader: segHeader{off: uint64(off), size: uint64(len(b))}, pos: uint64(f.off + int64(segHeaderSize))}
+	f.file.WriteAt(s.segHeader.marshal(), int64(f.off))
+	n, err = f.file.WriteAt(b, int64(s.pos))
 	f.segs = append(f.segs, s)
-	f.off += 16 + s.size
+	f.off += int64(segHeaderSize) + int64(s.size)
 	f.size += int64(s.size)
 	return
 }
@@ -222,11 +245,19 @@ func (f *SegFile) WriteAt(b []byte, off int64) (n int, err error) {
 // It returns the number of bytes read and any error encountered.
 // At end of file, Read returns 0, io.EOF.
 func (f *SegFile) ReadAt(off, size int64) (segs []seg, err error) {
-	for i := 0; i < len(f.segs); i++ {
+	idx := sort.Search(len(f.segs), func(i int) bool {
+		return f.segs[i].off > uint64(off)
+	})
+	start := idx - 1
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(f.segs); i++ {
 		s := f.segs[i]
 		if int64(s.off+s.size) <= off {
 			continue
-		} else if int64(s.off) >= off+size {
+		}
+		if int64(s.off) >= off+size {
 			break
 		}
 		b := make([]byte, s.size)
