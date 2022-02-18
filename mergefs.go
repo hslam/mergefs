@@ -43,11 +43,16 @@ func (h *segHeader) unmarshal(b []byte) {
 
 type seg struct {
 	segHeader
-	pos  uint64
+	pos uint64
+}
+
+// Seg represents a segmented data.
+type Seg struct {
+	segHeader
 	data []byte
 }
 
-func mergeSegs(a []seg, b []seg) []seg {
+func mergeSegs(a []Seg, b []Seg) []Seg {
 	if len(a) == 0 {
 		return b
 	}
@@ -90,10 +95,9 @@ func Remove(name string) error {
 	return nil
 }
 
-// File is a merge file.
+// File represents a merged file.
 type File struct {
-	files []*SegFile
-	size  int64
+	files []SegFile
 }
 
 // OpenFile opens the named file for reading. If successful, methods on
@@ -101,47 +105,46 @@ type File struct {
 // descriptor has mode O_RDONLY.
 // If there is an error, it will be of type *PathError.
 func OpenFile(name string) (*File, error) {
-	var size int64
-	var files = make([]*SegFile, numFiles)
+	var files = make([]SegFile, numFiles)
 	for i := 0; i < len(files); i++ {
 		file, err := OpenSegFile(fmt.Sprintf("%s-%d", name, i))
 		if err != nil {
 			return nil, err
 		}
 		files[i] = file
-		if int64(file.size) > size {
-			size = int64(file.size)
-		}
 	}
-	return &File{files: files, size: size}, nil
+	return Open(files...)
 }
 
-func (f *File) file() *SegFile {
+// Open opens the merged file for reading. If successful, methods on
+// the returned file can be used for reading; the associated file
+// descriptor has mode O_RDONLY.
+// If there is an error, it will be of type *PathError.
+func Open(files ...SegFile) (*File, error) {
+	return &File{files: files}, nil
+}
+
+func (f *File) file() SegFile {
 	return f.files[rand.Intn(len(f.files))]
 }
 
-// WriteAt writes len(b) bytes to the File starting at byte offset off.
-// It returns the number of bytes written and an error, if any.
-// WriteAt returns a non-nil error when n != len(b).
-//
-// If file was opened with the O_APPEND flag, WriteAt returns an error.
+// WriteAt writes len(p) bytes from p to the underlying data stream
+// at offset off. It returns the number of bytes written from p (0 <= n <= len(p))
+// and any error encountered that caused the write to stop early.
+// WriteAt must return a non-nil error if it returns n < len(p).
 func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
 	n, err = f.file().WriteAt(b, off)
 	if err != nil {
 		return
 	}
-	f.size += int64(len(b))
 	return
 }
 
-// ReadAt reads up to len(b) bytes from the File.
-// It returns the number of bytes read and any error encountered.
-// At end of file, Read returns 0, io.EOF.
+// ReadAt reads len(p) bytes into p starting at offset off in the
+// underlying input source. It returns the number of bytes
+// read (0 <= n <= len(p)) and any error encountered.
 func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
-	if off > f.size {
-		return 0, io.EOF
-	}
-	var segs []seg
+	var segs []Seg
 	for i := 0; i < len(f.files); i++ {
 		ss, err := f.files[i].ReadAt(off, int64(len(b)))
 		if err != nil && err != io.EOF {
@@ -179,25 +182,39 @@ func (f *File) Close() error {
 	return nil
 }
 
-// SegFile is a segmented file.
-type SegFile struct {
-	name string
+// SegFile represents a segmented file.
+type SegFile interface {
+	// WriteAt writes len(p) bytes from p to the underlying data stream
+	// at offset off. It returns the number of bytes written from p (0 <= n <= len(p))
+	// and any error encountered that caused the write to stop early.
+	// WriteAt must return a non-nil error if it returns n < len(p).
+	WriteAt(b []byte, off int64) (n int, err error)
+	// ReadAt reads segs starting at offset off in the
+	// underlying input source. It returns the segs and any error encountered.
+	ReadAt(off, size int64) (segs []Seg, err error)
+	// Close closes the File, rendering it unusable for I/O.
+	// On files that support SetDeadline, any pending I/O operations will
+	// be canceled and return immediately with an error.
+	// Close will return an error if it has already been called.
+	Close() error
+}
+
+type segFile struct {
 	file *os.File
-	size int64
 	off  int64
 	segs []seg
 }
 
-// OpenSegFile opens the named file for reading. If successful, methods on
+// OpenSegFile opens the segmented file for reading. If successful, methods on
 // the returned file can be used for reading; the associated file
 // descriptor has mode O_RDONLY.
 // If there is an error, it will be of type *PathError.
-func OpenSegFile(name string) (*SegFile, error) {
+func OpenSegFile(name string) (SegFile, error) {
 	file, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
-	f := &SegFile{name: name, file: file}
+	f := &segFile{file: file}
 	var a [segHeaderSize]byte
 	var off int64
 	for {
@@ -220,31 +237,26 @@ func OpenSegFile(name string) (*SegFile, error) {
 		f.segs = append(f.segs, s)
 		f.off += int64(segHeaderSize) + int64(s.size)
 		off = int64(f.off)
-		f.size = int64(s.off + s.size)
 	}
-
 	return f, nil
 }
 
-// WriteAt writes len(b) bytes to the File starting at byte offset off.
-// It returns the number of bytes written and an error, if any.
-// WriteAt returns a non-nil error when n != len(b).
-//
-// If file was opened with the O_APPEND flag, WriteAt returns an error.
-func (f *SegFile) WriteAt(b []byte, off int64) (n int, err error) {
+// WriteAt writes len(p) bytes from p to the underlying data stream
+// at offset off. It returns the number of bytes written from p (0 <= n <= len(p))
+// and any error encountered that caused the write to stop early.
+// WriteAt must return a non-nil error if it returns n < len(p).
+func (f *segFile) WriteAt(b []byte, off int64) (n int, err error) {
 	s := seg{segHeader: segHeader{off: uint64(off), size: uint64(len(b))}, pos: uint64(f.off + int64(segHeaderSize))}
 	f.file.WriteAt(s.segHeader.marshal(), int64(f.off))
 	n, err = f.file.WriteAt(b, int64(s.pos))
 	f.segs = append(f.segs, s)
 	f.off += int64(segHeaderSize) + int64(s.size)
-	f.size += int64(s.size)
 	return
 }
 
-// ReadAt reads up to len(b) bytes from the File.
-// It returns the number of bytes read and any error encountered.
-// At end of file, Read returns 0, io.EOF.
-func (f *SegFile) ReadAt(off, size int64) (segs []seg, err error) {
+// ReadAt reads segs starting at offset off in the
+// underlying input source. It returns the segs and any error encountered.
+func (f *segFile) ReadAt(off, size int64) (segs []Seg, err error) {
 	idx := sort.Search(len(f.segs), func(i int) bool {
 		return f.segs[i].off > uint64(off)
 	})
@@ -262,9 +274,9 @@ func (f *SegFile) ReadAt(off, size int64) (segs []seg, err error) {
 		}
 		b := make([]byte, s.size)
 		_, err = f.file.ReadAt(b, int64(s.pos))
-		var cp = s
-		cp.data = b
-		segs = append(segs, cp)
+		var r = Seg{segHeader: s.segHeader}
+		r.data = b
+		segs = append(segs, r)
 	}
 	return segs, err
 }
@@ -273,6 +285,6 @@ func (f *SegFile) ReadAt(off, size int64) (segs []seg, err error) {
 // On files that support SetDeadline, any pending I/O operations will
 // be canceled and return immediately with an error.
 // Close will return an error if it has already been called.
-func (f *SegFile) Close() error {
+func (f *segFile) Close() error {
 	return f.file.Close()
 }
