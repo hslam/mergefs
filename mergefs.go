@@ -17,42 +17,42 @@ const (
 	numFiles = 2
 )
 
-const segHeaderSize = int(unsafe.Sizeof(segHeader{}))
+const frameHeaderSize = int(unsafe.Sizeof(frameHeader{}))
 
-type segHeader struct {
+type frameHeader struct {
 	off  uint64
 	size uint64
 }
 
-func (h *segHeader) marshal() []byte {
+func (h *frameHeader) marshal() []byte {
 	var b []byte
-	r := (*struct {
+	hdr := (*struct {
 		data uintptr
 		len  int
 		cap  int
 	})(unsafe.Pointer(&b))
-	r.data = uintptr(unsafe.Pointer(h))
-	r.len = segHeaderSize
-	r.cap = segHeaderSize
+	hdr.data = uintptr(unsafe.Pointer(h))
+	hdr.len = frameHeaderSize
+	hdr.cap = frameHeaderSize
 	return b
 }
 
-func (h *segHeader) unmarshal(b []byte) {
-	*h = *(*segHeader)(unsafe.Pointer(&b[0]))
+func (h *frameHeader) unmarshal(b []byte) {
+	*h = *(*frameHeader)(unsafe.Pointer(&b[0]))
 }
 
-type seg struct {
-	segHeader
+type frame struct {
+	frameHeader
 	pos uint64
 }
 
-// Seg represents a segmented data.
-type Seg struct {
-	segHeader
+// Frame represents a frame data.
+type Frame struct {
+	frameHeader
 	data []byte
 }
 
-func mergeSegs(a []Seg, b []Seg) []Seg {
+func mergeFrames(a []Frame, b []Frame) []Frame {
 	if len(a) == 0 {
 		return b
 	}
@@ -144,17 +144,17 @@ func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
 // underlying input source. It returns the number of bytes
 // read (0 <= n <= len(p)) and any error encountered.
 func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
-	var segs []Seg
+	var frames []Frame
 	for i := 0; i < len(f.files); i++ {
 		ss, err := f.files[i].ReadAt(off, int64(len(b)))
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
-		segs = mergeSegs(segs, ss)
+		frames = mergeFrames(frames, ss)
 	}
 	length := len(b)
-	for i := 0; i < len(segs) && n < length; i++ {
-		s := segs[i]
+	for i := 0; i < len(frames) && n < length; i++ {
+		s := frames[i]
 		segOff := off - int64(s.off)
 		segRemain := int(s.size - uint64(segOff))
 		readSize := segRemain
@@ -189,9 +189,9 @@ type SegFile interface {
 	// and any error encountered that caused the write to stop early.
 	// WriteAt must return a non-nil error if it returns n < len(p).
 	WriteAt(b []byte, off int64) (n int, err error)
-	// ReadAt reads segs starting at offset off in the
-	// underlying input source. It returns the segs and any error encountered.
-	ReadAt(off, size int64) (segs []Seg, err error)
+	// ReadAt reads frames starting at offset off in the
+	// underlying input source. It returns the frames and any error encountered.
+	ReadAt(off, size int64) (frames []Frame, err error)
 	// Close closes the File, rendering it unusable for I/O.
 	// On files that support SetDeadline, any pending I/O operations will
 	// be canceled and return immediately with an error.
@@ -200,9 +200,9 @@ type SegFile interface {
 }
 
 type segFile struct {
-	file *os.File
-	off  int64
-	segs []seg
+	file   *os.File
+	off    int64
+	frames []frame
 }
 
 // OpenSegFile opens the segmented file for reading. If successful, methods on
@@ -215,7 +215,7 @@ func OpenSegFile(name string) (SegFile, error) {
 		return nil, err
 	}
 	f := &segFile{file: file}
-	var a [segHeaderSize]byte
+	var a [frameHeaderSize]byte
 	var off int64
 	for {
 		buf := a[:]
@@ -226,16 +226,16 @@ func OpenSegFile(name string) (SegFile, error) {
 			}
 			break
 		}
-		if n != segHeaderSize {
+		if n != frameHeaderSize {
 			break
 		}
-		var s seg
-		h := &segHeader{}
+		var s frame
+		h := &frameHeader{}
 		h.unmarshal(buf)
-		s.segHeader = *h
-		s.pos = uint64(off) + uint64(segHeaderSize)
-		f.segs = append(f.segs, s)
-		f.off += int64(segHeaderSize) + int64(s.size)
+		s.frameHeader = *h
+		s.pos = uint64(off) + uint64(frameHeaderSize)
+		f.frames = append(f.frames, s)
+		f.off += int64(frameHeaderSize) + int64(s.size)
 		off = int64(f.off)
 	}
 	return f, nil
@@ -246,26 +246,26 @@ func OpenSegFile(name string) (SegFile, error) {
 // and any error encountered that caused the write to stop early.
 // WriteAt must return a non-nil error if it returns n < len(p).
 func (f *segFile) WriteAt(b []byte, off int64) (n int, err error) {
-	s := seg{segHeader: segHeader{off: uint64(off), size: uint64(len(b))}, pos: uint64(f.off + int64(segHeaderSize))}
-	f.file.WriteAt(s.segHeader.marshal(), int64(f.off))
+	s := frame{frameHeader: frameHeader{off: uint64(off), size: uint64(len(b))}, pos: uint64(f.off + int64(frameHeaderSize))}
+	f.file.WriteAt(s.frameHeader.marshal(), int64(f.off))
 	n, err = f.file.WriteAt(b, int64(s.pos))
-	f.segs = append(f.segs, s)
-	f.off += int64(segHeaderSize) + int64(s.size)
+	f.frames = append(f.frames, s)
+	f.off += int64(frameHeaderSize) + int64(s.size)
 	return
 }
 
-// ReadAt reads segs starting at offset off in the
-// underlying input source. It returns the segs and any error encountered.
-func (f *segFile) ReadAt(off, size int64) (segs []Seg, err error) {
-	idx := sort.Search(len(f.segs), func(i int) bool {
-		return f.segs[i].off > uint64(off)
+// ReadAt reads frames starting at offset off in the
+// underlying input source. It returns the frames and any error encountered.
+func (f *segFile) ReadAt(off, size int64) (frames []Frame, err error) {
+	idx := sort.Search(len(f.frames), func(i int) bool {
+		return f.frames[i].off > uint64(off)
 	})
 	start := idx - 1
 	if start < 0 {
 		start = 0
 	}
-	for i := start; i < len(f.segs); i++ {
-		s := f.segs[i]
+	for i := start; i < len(f.frames); i++ {
+		s := f.frames[i]
 		if int64(s.off+s.size) <= off {
 			continue
 		}
@@ -274,11 +274,11 @@ func (f *segFile) ReadAt(off, size int64) (segs []Seg, err error) {
 		}
 		b := make([]byte, s.size)
 		_, err = f.file.ReadAt(b, int64(s.pos))
-		var r = Seg{segHeader: s.segHeader}
+		var r = Frame{frameHeader: s.frameHeader}
 		r.data = b
-		segs = append(segs, r)
+		frames = append(frames, r)
 	}
-	return segs, err
+	return frames, err
 }
 
 // Close closes the File, rendering it unusable for I/O.
