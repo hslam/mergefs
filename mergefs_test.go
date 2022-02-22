@@ -48,6 +48,7 @@ func TestFile(t *testing.T) {
 				remain -= n
 			}
 		}
+		f.Sync()
 		for off := int64(0); off < int64(len(content)/2); off++ {
 			buf := make([]byte, rand.Intn(256))
 			n, err := f.ReadAt(buf, off)
@@ -85,6 +86,7 @@ func TestFile(t *testing.T) {
 				remain -= n
 			}
 		}
+		f.Sync()
 		for off := int64(0); off < int64(len(content)); off++ {
 			buf := make([]byte, rand.Intn(512))
 			n, err := f.ReadAt(buf, off)

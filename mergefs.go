@@ -168,6 +168,19 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 	return n, err
 }
 
+// Sync commits the current contents of the file to stable storage.
+// Typically, this means flushing the file system's in-memory copy
+// of recently written data to disk.
+func (f *File) Sync() error {
+	for i := 0; i < len(f.files); i++ {
+		err := f.files[i].Sync()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Close closes the File, rendering it unusable for I/O.
 // On files that support SetDeadline, any pending I/O operations will
 // be canceled and return immediately with an error.
@@ -192,6 +205,10 @@ type SegFile interface {
 	// ReadAt reads frames starting at offset off in the
 	// underlying input source. It returns the frames and any error encountered.
 	ReadAt(off, size int64) (frames []Frame, err error)
+	// Sync commits the current contents of the file to stable storage.
+	// Typically, this means flushing the file system's in-memory copy
+	// of recently written data to disk.
+	Sync() error
 	// Close closes the File, rendering it unusable for I/O.
 	// On files that support SetDeadline, any pending I/O operations will
 	// be canceled and return immediately with an error.
@@ -279,6 +296,13 @@ func (f *segFile) ReadAt(off, size int64) (frames []Frame, err error) {
 		frames = append(frames, r)
 	}
 	return frames, err
+}
+
+// Sync commits the current contents of the file to stable storage.
+// Typically, this means flushing the file system's in-memory copy
+// of recently written data to disk.
+func (f *segFile) Sync() error {
+	return f.file.Sync()
 }
 
 // Close closes the File, rendering it unusable for I/O.
